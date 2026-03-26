@@ -1,5 +1,6 @@
-from pydantic import BaseModel, EmailStr, Field
 from typing import Optional
+
+from pydantic import BaseModel, EmailStr, Field
 
 
 class UserBase(BaseModel):
@@ -26,10 +27,12 @@ class UserInDBBase(UserBase):
 
 
 class UserInDB(UserInDBBase):
-    hashed_password: str
+    """Internal schema that includes the hashed password – never returned to clients."""
+    password_hash: str
 
 
 class UserResponse(UserInDBBase):
+    """Public user representation returned by API endpoints."""
     pass
 
 

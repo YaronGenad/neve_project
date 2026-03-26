@@ -28,3 +28,17 @@ __pycache__/
 # OS
 .DS_Store
 Thumbs.db
+
+# SQLite databases (runtime artifacts)
+*.db
+*.sqlite
+*.sqlite3
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+frontend/.env
+frontend/.env.local
+
+# Generated materials (large runtime output)
+generated_materials/

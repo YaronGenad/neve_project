@@ -1,39 +1,42 @@
-from fastapi import APIRouter, Depends, HTTPException, status
-from fastapi.security import OAuth2PasswordRequestForm, OAuth2PasswordBearer
-from sqlalchemy.orm import Session
+import uuid
 from datetime import timedelta
 from typing import Optional
-from app.db.session import get_db
-from app.models.user import User
+
+from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+from slowapi import Limiter
+from slowapi.util import get_remote_address
+from sqlalchemy.orm import Session
+
+from app.core.config import settings
 from app.core.security import (
-    verify_password,
-    get_password_hash,
     create_access_token,
     create_refresh_token,
+    get_password_hash,
+    verify_password,
     verify_token,
 )
-from app.schemas.user import UserCreate, UserResponse, Token, RefreshTokenRequest
-from app.core.config import settings
+from app.db.session import get_db
+from app.models.user import User
+from app.schemas.user import RefreshTokenRequest, Token, UserCreate, UserResponse
 
 router = APIRouter()
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="auth/login")
+limiter = Limiter(key_func=get_remote_address)
 
 
 @router.post("/register", response_model=UserResponse)
-def register_user(user_in: UserCreate, db: Session = Depends(get_db)):
-    # Check if user already exists
+@limiter.limit(settings.AUTH_RATE_LIMIT)
+def register_user(request: Request, user_in: UserCreate, db: Session = Depends(get_db)):
     user = db.query(User).filter(User.email == user_in.email).first()
     if user:
         raise HTTPException(
             status_code=400,
             detail="Email already registered",
         )
-    
-    # Create new user
-    # In a real app, you would generate a UUID here
-    # For simplicity, we'll use email as ID for now
+
     user = User(
-        id=user_in.email,  # Using email as ID for simplicity
+        id=str(uuid.uuid4()),
         email=user_in.email,
         password_hash=get_password_hash(user_in.password),
         full_name=user_in.full_name,
@@ -45,8 +48,11 @@ def register_user(user_in: UserCreate, db: Session = Depends(get_db)):
 
 
 @router.post("/login", response_model=Token)
+@limiter.limit(settings.AUTH_RATE_LIMIT)
 def login_access_token(
-    db: Session = Depends(get_db), form_data: OAuth2PasswordRequestForm = Depends()
+    request: Request,
+    db: Session = Depends(get_db),
+    form_data: OAuth2PasswordRequestForm = Depends(),
 ):
     user = db.query(User).filter(User.email == form_data.username).first()
     if not user:

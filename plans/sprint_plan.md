@@ -3,22 +3,22 @@
 ## Overview
 This document breaks down the implementation into 6 sprints, each with specific goals and deliverables.
 
-## Sprint 1: Core Infrastructure & Authentication
+## Sprint 1: Core Infrastructure & Authentication ✅
 **Goal**: Set up the foundational backend with authentication and database
 
 ### Tasks:
-- [ ] Set up PostgreSQL database and connection pooling
-- [ ] Implement SQLAlchemy models for User, Query, and Material tables
-- [ ] Create Alembic migrations for database schema
-- [ ] Implement user registration endpoint with email/password
-- [ ] Implement login endpoint returning JWT access and refresh tokens
-- [ ] Implement token refresh endpoint
-- [ ] Add password hashing using bcrypt
-- [ ] Create basic FastAPI application structure
-- [ ] Implement middleware for authentication and error handling
-- [ ] Add health check endpoint
-- [ ] Write unit tests for authentication endpoints
-- [ ] Create Dockerfile for backend service
+- [x] Set up PostgreSQL database and connection pooling
+- [x] Implement SQLAlchemy models for User, Query, and Material tables
+- [x] Create Alembic migrations for database schema
+- [x] Implement user registration endpoint with email/password
+- [x] Implement login endpoint returning JWT access and refresh tokens
+- [x] Implement token refresh endpoint
+- [x] Add password hashing using bcrypt
+- [x] Create basic FastAPI application structure
+- [x] Implement middleware for authentication and error handling
+- [x] Add health check endpoint
+- [x] Write unit tests for authentication endpoints
+- [x] Create Dockerfile for backend service
 
 ### Deliverables:
 - Working authentication system (register, login, refresh)
@@ -26,20 +26,20 @@ This document breaks down the implementation into 6 sprints, each with specific 
 - Basic API documentation (Swagger/OpenAPI)
 - Unit test coverage for auth endpoints
 
-## Sprint 2: Generation Pipeline Integration
+## Sprint 2: Generation Pipeline Integration ✅
 **Goal**: Integrate the existing generation pipeline as a backend service
 
 ### Tasks:
-- [ ] Extract generation pipeline from existing code into a service class
-- [ ] Create API endpoint for submitting generation requests
-- [ ] Implement file storage system (local filesystem or cloud storage)
-- [ ] Create endpoint to retrieve generation status and results
-- [ ] Implement PDF generation and storage
-- [ ] Add endpoint to download generated materials (PDF/HTML)
-- [ ] Implement proper error handling for generation failures
-- [ ] Add rate limiting for generation endpoints
-- [ ] Write integration tests for generation flow
-- [ ] Update Dockerfile to include generation dependencies
+- [x] Extract generation pipeline from existing code into a service class
+- [x] Create API endpoint for submitting generation requests
+- [x] Implement file storage system (local filesystem or cloud storage)
+- [x] Create endpoint to retrieve generation status and results
+- [x] Implement PDF generation and storage
+- [x] Add endpoint to download generated materials (PDF/HTML)
+- [x] Implement proper error handling for generation failures
+- [x] Add rate limiting for generation endpoints
+- [x] Write integration tests for generation flow
+- [x] Update Dockerfile to include generation dependencies
 
 ### Deliverables:
 - POST /generate endpoint that accepts subject/topic/grade/rounds
@@ -48,21 +48,21 @@ This document breaks down the implementation into 6 sprints, each with specific 
 - Generated files stored securely and accessible via API
 - Integration test coverage
 
-## Sprint 3: Caching & BM25 Similarity Search
+## Sprint 3: Caching & BM25 Similarity Search ✅
 **Goal**: Implement Redis caching and BM25-based similarity search
 
 ### Tasks:
-- [ ] Set up Redis connection and configuration
-- [ ] Implement caching layer for recent queries (TTL: 24 hours)
-- [ ] Implement caching for generated materials (TTL: 7 days)
-- [ ] Create query normalization function (lowercase, trim whitespace)
-- [ ] Implement BM25 index using rank-bm25 library
-- [ ] Create background job to rebuild BM25 index periodically
-- [ ] Store BM25 index in Redis for fast lookup
-- [ ] Implement similarity search endpoint
-- [ ] Add logic to check cache before generating new materials
-- [ ] Implement cache warming strategy for common queries
-- [ ] Write tests for caching and search functionality
+- [x] Set up Redis connection and configuration
+- [x] Implement caching layer for recent queries (TTL: 24 hours)
+- [x] Implement caching for generated materials (TTL: 7 days)
+- [x] Create query normalization function (lowercase, trim whitespace)
+- [x] Implement BM25 index using rank-bm25 library
+- [x] Create background job to rebuild BM25 index periodically
+- [x] Store BM25 index in Redis for fast lookup
+- [x] Implement similarity search endpoint
+- [x] Add logic to check cache before generating new materials
+- [ ] Implement cache warming strategy for common queries ← **נדחה ל-Sprint 5**
+- [x] Write tests for caching and search functionality
 
 ### Deliverables:
 - Redis caching layer working for queries and materials
@@ -71,23 +71,23 @@ This document breaks down the implementation into 6 sprints, each with specific 
 - Cache hit/miss metrics logging
 - Test coverage for caching and search
 
-## Sprint 4: Frontend Development
+## Sprint 4: Frontend Development ✅
 **Goal**: Create React frontend for teacher interface
 
 ### Tasks:
-- [ ] Set up React project with TypeScript
-- [ ] Configure routing (React Router v6)
-- [ ] Implement authentication context and protected routes
-- [ ] Create login/register pages with form validation
-- [ ] Design dashboard showing query history
-- [ ] Create query submission form (subject, topic, grade, rounds)
-- [ ] Implement real-time similarity suggestions as user types
-- [ ] Create results viewer with material preview
-- [ ] Implement download functionality for generated materials
-- [ ] Add loading states and error handling
-- [ ] Implement responsive design for desktop/tablet
-- [ ] Write unit tests for key components
-- [ ] Set up ESLint and Prettier for code quality
+- [x] Set up React project with TypeScript (Vite + React 18)
+- [x] Configure routing (React Router v6)
+- [x] Implement authentication context and protected routes
+- [x] Create login/register pages with form validation (React Hook Form + Zod)
+- [x] Design dashboard showing query history (table + pagination + auto-refresh)
+- [x] Create query submission form (subject, topic, grade, rounds slider)
+- [x] Implement real-time similarity suggestions as user types (debounced 500ms → /search/)
+- [x] Create results viewer with material preview (GenerationDetailPage)
+- [x] Implement download functionality for generated materials (per-file + per-round)
+- [x] Add loading states and error handling (Skeleton, CircularProgress, Alerts)
+- [x] Implement responsive design for desktop/tablet (MUI Grid + RTL)
+- [ ] Write unit tests for key components ← **נדחה ל-Sprint 5**
+- [x] Set up ESLint and Prettier for code quality
 
 ### Deliverables:
 - Login/registration pages
@@ -115,6 +115,8 @@ This document breaks down the implementation into 6 sprints, each with specific 
 - [ ] Perform usability testing and refine UI/UX
 - [ ] Optimize database queries and add indexes
 - [ ] Implement file cleanup service for temporary files
+- [ ] **[נדחה מ-Sprint 3]** Implement cache warming strategy for common queries
+- [ ] **[נדחה מ-Sprint 4]** Write unit tests for frontend key components (Jest + React Testing Library)
 
 ### Deliverables:
 - Security-hardened application
@@ -127,7 +129,7 @@ This document breaks down the implementation into 6 sprints, each with specific 
 **Goal**: Prepare for production deployment and set up monitoring
 
 ### Tasks:
-- [ ] Create Docker Compose file for local development
+- [x] Create Docker Compose file for local development (docker-compose.yml עם postgres, redis, backend, frontend)
 - [ ] Create Kubernetes manifests for production deployment
 - [ ] Set up CI/CD pipeline (GitHub Actions or similar)
 - [ ] Configure environment-specific settings (dev/staging/prod)

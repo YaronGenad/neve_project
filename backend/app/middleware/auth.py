@@ -1,11 +1,11 @@
-from fastapi import Request, HTTPException
+import logging
+
+from fastapi import Request
 from fastapi.security.utils import get_authorization_scheme_param
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import Response
+
 from app.core.security import verify_token
-from app.db.session import SessionLocal
-from app.models.user import User
-import logging
 
 logger = logging.getLogger(__name__)
 

@@ -1,8 +1,15 @@
 import os
-# Set environment variables for testing
-os.environ["SECRET_KEY"] = "test-secret-key-for-testing"
-os.environ["DEBUG"] = "true"
-os.environ["DATABASE_URL"] = "sqlite:///./test_alhasade_complete.db"
+import sys
+# Set environment variables for testing (conftest.py handles these when running
+# via pytest; setdefault ensures they work for direct `python ...` execution too)
+os.environ.setdefault("SECRET_KEY", "test-secret-key-for-testing")
+os.environ.setdefault("DEBUG", "true")
+os.environ.setdefault("DATABASE_URL", "sqlite:///./test_alhasade_complete.db")
+os.environ.setdefault("AUTH_RATE_LIMIT", "1000/minute")
+os.environ.setdefault("GENERATION_RATE_LIMIT", "1000/minute")
+
+# Add src to path so we can import the pipeline modules
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 
 # Import the app and set up the database
 from fastapi.testclient import TestClient
@@ -10,6 +17,10 @@ from app.main import app
 from app.db.session import engine
 from app.db.base import Base
 from app.models import user, query, material
+
+# Remove existing test database file to ensure clean state
+if os.path.exists("./test_alhasade_complete.db"):
+    os.remove("./test_alhasade_complete.db")
 
 # Create the tables
 Base.metadata.create_all(bind=engine)
@@ -188,7 +199,7 @@ def test_get_current_user():
     data = response.json()
     assert data["email"] == "test_me@example.com"
     assert data["full_name"] == "Test User"
-    assert data["id"] == "test_me@example.com"
+    assert "id" in data  # id is now a UUID
     print("Get current user test passed!")
 
 def test_get_current_user_invalid_token():
