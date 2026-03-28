@@ -1,30 +1,39 @@
 """
-Redis-backed cache service.
+Redis-backed cache service (Sprint 4.5 — revised key schema).
 
-All operations degrade gracefully when Redis is unavailable – the caller
-never needs to check `cache.available` before calling a method; every
-method simply returns None/False instead of raising.
+Key schema:
+  unit:{subject}:{topic}:{grade}   JSON list of material IDs sorted by approval_count DESC  (7 days)
+  hot:units:top50                  Sorted set — 50 most-requested topic keys (no TTL; capped by zremrangebyrank)
+  gen:status:{job_id}              Async generation status dict (1 hour)
+  query:{md5}                      Legacy: full generation result JSON for exact-hash cache hits (24 hours)
+  material:{id}                    Material metadata JSON (7 days)
+
+Removed from v1:
+  bm25:index / bm25:query_ids      — replaced by Postgres tsvector
+  user:{id}:history                — moved to Postgres only
+
+All operations degrade gracefully when Redis is unavailable.
 """
 import hashlib
 import json
-import pickle
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 import redis
 
 from app.core.config import settings
 
 # ── TTLs ──────────────────────────────────────────────────────────────────────
-QUERY_TTL = 24 * 3600           # 24 hours
-MATERIAL_TTL = 7 * 24 * 3600   # 7 days
-USER_HISTORY_TTL = 30 * 24 * 3600  # 30 days
-BM25_INDEX_TTL = 3600           # 1 hour
+UNIT_TTL = 7 * 24 * 3600       # 7 days  — unit ID lists
+MATERIAL_TTL = 7 * 24 * 3600   # 7 days  — material metadata
+QUERY_TTL = 24 * 3600          # 24 hours — legacy exact-hash cache
+GEN_STATUS_TTL = 3600          # 1 hour  — async generation status
 
 
 def _make_redis_client(url: str) -> Optional[redis.Redis]:
-    """Try to create and ping a Redis client; return None on failure."""
     try:
-        client: redis.Redis = redis.from_url(url, decode_responses=False, socket_connect_timeout=2)
+        client: redis.Redis = redis.from_url(
+            url, decode_responses=False, socket_connect_timeout=2
+        )
         client.ping()
         return client
     except Exception:
@@ -33,13 +42,10 @@ def _make_redis_client(url: str) -> Optional[redis.Redis]:
 
 class CacheService:
     def __init__(self, redis_client: Optional[redis.Redis] = None):
-        # Allow injection of a fake/test client
         if redis_client is not None:
             self._client: Optional[redis.Redis] = redis_client
         else:
             self._client = _make_redis_client(settings.REDIS_URL)
-
-    # ── availability ──────────────────────────────────────────────────────────
 
     @property
     def available(self) -> bool:
@@ -49,7 +55,7 @@ class CacheService:
 
     @staticmethod
     def query_hash(subject: str, topic: str, grade: str, rounds: int) -> str:
-        """Stable MD5 hash for a normalized query tuple."""
+        """Stable MD5 hash for exact-match cache key."""
         normalized = (
             f"{subject.lower().strip()}"
             f"|{topic.lower().strip()}"
@@ -58,10 +64,98 @@ class CacheService:
         )
         return hashlib.md5(normalized.encode("utf-8")).hexdigest()
 
-    # ── query cache ───────────────────────────────────────────────────────────
+    @staticmethod
+    def _unit_key(subject: str, topic: str, grade: str) -> str:
+        return (
+            f"unit:{subject.lower().strip()}"
+            f":{topic.lower().strip()}"
+            f":{grade.lower().strip()}"
+        )
+
+    # ── unit ID list cache ────────────────────────────────────────────────────
+
+    def get_unit_ids(self, subject: str, topic: str, grade: str) -> Optional[List[str]]:
+        """Return cached list of material IDs sorted by approval_count DESC, or None."""
+        if not self.available:
+            return None
+        try:
+            raw = self._client.get(self._unit_key(subject, topic, grade))
+            return json.loads(raw) if raw else None
+        except Exception:
+            return None
+
+    def set_unit_ids(
+        self, subject: str, topic: str, grade: str, ids: List[str]
+    ) -> bool:
+        """Store material ID list for this subject/topic/grade."""
+        if not self.available:
+            return False
+        try:
+            self._client.setex(
+                self._unit_key(subject, topic, grade),
+                UNIT_TTL,
+                json.dumps(ids).encode("utf-8"),
+            )
+            return True
+        except Exception:
+            return False
+
+    def invalidate_unit_ids(self, subject: str, topic: str, grade: str) -> bool:
+        """Remove cached unit list so next request re-queries the DB."""
+        if not self.available:
+            return False
+        try:
+            self._client.delete(self._unit_key(subject, topic, grade))
+            return True
+        except Exception:
+            return False
+
+    # ── hot units sorted set ──────────────────────────────────────────────────
+
+    def update_hot_units(self, subject: str, topic: str, grade: str) -> None:
+        """Increment score for this topic in the hot:units:top50 sorted set."""
+        if not self.available:
+            return
+        try:
+            key = (
+                f"{subject.lower().strip()}"
+                f":{topic.lower().strip()}"
+                f":{grade.lower().strip()}"
+            )
+            self._client.zincrby("hot:units:top50", 1, key)
+            # Keep only top 50
+            self._client.zremrangebyrank("hot:units:top50", 0, -51)
+        except Exception:
+            pass
+
+    # ── async generation status ───────────────────────────────────────────────
+
+    def get_gen_status(self, job_id: str) -> Optional[Dict[str, Any]]:
+        if not self.available:
+            return None
+        try:
+            raw = self._client.get(f"gen:status:{job_id}")
+            return json.loads(raw) if raw else None
+        except Exception:
+            return None
+
+    def set_gen_status(self, job_id: str, status_data: Dict[str, Any]) -> bool:
+        if not self.available:
+            return False
+        try:
+            self._client.setex(
+                f"gen:status:{job_id}",
+                GEN_STATUS_TTL,
+                json.dumps(status_data, default=str).encode("utf-8"),
+            )
+            return True
+        except Exception:
+            return False
+
+    # ── legacy exact-hash query cache ─────────────────────────────────────────
+    # Kept for backward compatibility; may be removed in Sprint 5.
 
     def get_cached_query(self, query_hash: str) -> Optional[Dict[str, Any]]:
-        """Return cached generation result dict, or None."""
         if not self.available:
             return None
         try:
@@ -71,7 +165,6 @@ class CacheService:
             return None
 
     def cache_query(self, query_hash: str, result: Dict[str, Any]) -> bool:
-        """Store a generation result. Returns True on success."""
         if not self.available:
             return False
         try:
@@ -85,7 +178,6 @@ class CacheService:
             return False
 
     def invalidate_query(self, query_hash: str) -> bool:
-        """Remove a cached query result."""
         if not self.available:
             return False
         try:
@@ -94,7 +186,7 @@ class CacheService:
         except Exception:
             return False
 
-    # ── material cache ────────────────────────────────────────────────────────
+    # ── material metadata cache ───────────────────────────────────────────────
 
     def get_cached_material(self, material_id: str) -> Optional[Dict[str, Any]]:
         if not self.available:
@@ -117,78 +209,3 @@ class CacheService:
             return True
         except Exception:
             return False
-
-    # ── user history cache ────────────────────────────────────────────────────
-
-    def get_user_history(self, user_id: str) -> Optional[List]:
-        if not self.available:
-            return None
-        try:
-            raw = self._client.get(f"user:{user_id}:history")
-            return json.loads(raw) if raw else None
-        except Exception:
-            return None
-
-    def cache_user_history(self, user_id: str, history: List) -> bool:
-        if not self.available:
-            return False
-        try:
-            self._client.setex(
-                f"user:{user_id}:history",
-                USER_HISTORY_TTL,
-                json.dumps(history, default=str).encode("utf-8"),
-            )
-            return True
-        except Exception:
-            return False
-
-    def invalidate_user_history(self, user_id: str) -> bool:
-        if not self.available:
-            return False
-        try:
-            self._client.delete(f"user:{user_id}:history")
-            return True
-        except Exception:
-            return False
-
-    # ── BM25 index cache ──────────────────────────────────────────────────────
-
-    def store_bm25_index(self, index_bytes: bytes, query_ids: List[str]) -> bool:
-        """Persist serialized BM25 index + query ID list."""
-        if not self.available:
-            return False
-        try:
-            pipe = self._client.pipeline()
-            pipe.setex("bm25:index", BM25_INDEX_TTL, index_bytes)
-            pipe.setex(
-                "bm25:query_ids",
-                BM25_INDEX_TTL,
-                json.dumps(query_ids).encode("utf-8"),
-            )
-            pipe.execute()
-            return True
-        except Exception:
-            return False
-
-    def get_bm25_index(self) -> Optional[Tuple[bytes, List[str]]]:
-        """Return (index_bytes, query_ids) or None if not cached / expired."""
-        if not self.available:
-            return None
-        try:
-            index_bytes = self._client.get("bm25:index")
-            ids_raw = self._client.get("bm25:query_ids")
-            if not index_bytes or not ids_raw:
-                return None
-            return index_bytes, json.loads(ids_raw)
-        except Exception:
-            return None
-
-    def invalidate_bm25_index(self) -> None:
-        """Force next BM25 lookup to rebuild from DB."""
-        if not self.available:
-            return
-        try:
-            self._client.delete("bm25:index")
-            self._client.delete("bm25:query_ids")
-        except Exception:
-            pass

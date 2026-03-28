@@ -1,12 +1,10 @@
 """
-Similarity-search endpoint.
+Similarity-search endpoint (Sprint 4.5).
 
-GET /search/?q=<text>&top_k=5&threshold=1.0
-Returns past completed generations whose BM25 score >= threshold.
+GET /search/?q=<text>&top_k=5&threshold=0.3
+Returns materials similar to the query via BM25 tsvector + pgvector.
 
-Intended to be called as the teacher types their query so the UI can
-surface "similar materials already generated" before triggering a new
-(expensive) generation.
+Replaces the old rank-bm25 / rebuild-index approach.
 """
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
@@ -20,6 +18,7 @@ from app.services.search import (
     SearchService,
     build_query_text,
     create_search_service,
+    normalize_query,
 )
 
 router = APIRouter()
@@ -27,30 +26,29 @@ router = APIRouter()
 
 @router.get("/")
 def search_similar(
-    q: str = Query(..., min_length=1, description="Free-text query (subject + topic + grade)"),
+    q: str = Query(..., min_length=1, description="Free-text query"),
     subject: str = Query(default="", description="Filter: subject"),
     topic: str = Query(default="", description="Filter: topic"),
     grade: str = Query(default="", description="Filter: grade"),
-    rounds: int = Query(default=4, ge=1, le=10, description="Rounds (used to build query text)"),
+    rounds: int = Query(default=4, ge=1, le=10),
     top_k: int = Query(default=DEFAULT_TOP_K, ge=1, le=20),
-    threshold: float = Query(default=DEFAULT_SIMILARITY_THRESHOLD, ge=0.0),
+    threshold: float = Query(default=DEFAULT_SIMILARITY_THRESHOLD, ge=0.0, le=1.0),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
     search_service: SearchService = Depends(create_search_service),
 ):
     """
-    Find past generations similar to the provided query text.
+    Find past materials similar to the provided query.
 
-    Pass `q` as a combined free-text string (e.g. "מדעים תאים ה-ו") or use
-    the structured `subject`/`topic`/`grade`/`rounds` parameters which will be
-    concatenated automatically.
+    Pass `q` as a free-text string OR use `subject`/`topic`/`grade` which will
+    be concatenated automatically.  Results combine BM25 and pgvector ranking.
     """
     if subject or topic or grade:
         query_text = build_query_text(subject, topic, grade, rounds)
     else:
-        query_text = q
+        query_text = normalize_query(q)
 
-    results = search_service.find_similar(
+    results = search_service.find_similar_for_search_endpoint(
         query_text=query_text,
         db=db,
         top_k=top_k,
@@ -62,26 +60,4 @@ def search_similar(
         "threshold": threshold,
         "count": len(results),
         "results": results,
-    }
-
-
-@router.post("/rebuild-index")
-def rebuild_bm25_index(
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-    search_service: SearchService = Depends(create_search_service),
-):
-    """
-    Force-rebuild the BM25 index from the current DB state.
-    Useful after bulk imports or when the cache has expired.
-    """
-    search_service.invalidate_index()
-    index, query_ids = search_service.build_index_from_db(db)
-    if index is not None:
-        search_service._persist_index(index, query_ids)
-
-    return {
-        "status": "rebuilt",
-        "indexed_queries": len(query_ids),
-        "cache_available": search_service.cache.available,
     }

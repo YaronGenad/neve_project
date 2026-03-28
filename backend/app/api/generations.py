@@ -7,6 +7,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request,
 from fastapi.responses import FileResponse
 from slowapi import Limiter
 from slowapi.util import get_remote_address
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.api.dependencies import get_current_user
@@ -22,6 +23,7 @@ from app.schemas.generation import (
     GenerationStatusResponse,
 )
 from app.services.cache import CacheService
+from app.services.embeddings import embed_text, embedding_to_pg_literal
 from app.services.generation import GenerationService, create_generation_service
 from app.services.search import SearchService, build_query_text, create_search_service
 
@@ -57,18 +59,52 @@ def process_generation_task(
 
         if result.get("status") == "completed":
             db_query.completed_at = datetime.utcnow()
-            db.add(Material(
-                id=str(uuid.uuid4()),
+            material_id = str(uuid.uuid4())
+            material = Material(
+                id=material_id,
                 query_id=query_id,
                 content_json=json.dumps(result.get("results", {})),
                 file_paths=json.dumps(result.get("files", {})),
                 version=1,
-            ))
+                subject=user_input.get("subject", ""),
+                topic=user_input.get("topic", ""),
+                grade=user_input.get("grade", ""),
+            )
+            db.add(material)
+            db.flush()  # trigger fires → fts_vector populated automatically
+
+            # Compute and store embedding (best-effort; non-blocking on failure)
+            embed_input = (
+                f"{user_input.get('subject', '')} "
+                f"{user_input.get('topic', '')} "
+                f"{user_input.get('grade', '')}"
+            ).strip()
+            embedding = embed_text(embed_input)
+            if embedding:
+                db.execute(
+                    text(
+                        "UPDATE materials SET embedding = CAST(:vec AS vector) "
+                        "WHERE id = :mid"
+                    ),
+                    {"vec": embedding_to_pg_literal(embedding), "mid": material_id},
+                )
+
             db.commit()
 
             cache = CacheService()
             cache.cache_query(query_hash, result)
-            cache.invalidate_bm25_index()
+            # Update unit cache so the next identical request hits Redis
+            cache.set_unit_ids(
+                user_input.get("subject", ""),
+                user_input.get("topic", ""),
+                user_input.get("grade", ""),
+                [material_id],
+            )
+            cache.update_hot_units(
+                user_input.get("subject", ""),
+                user_input.get("topic", ""),
+                user_input.get("grade", ""),
+            )
         else:
             db.commit()
 
@@ -115,45 +151,54 @@ async def create_generation(
         generation_request.rounds,
     )
 
-    # ── 1. Exact cache hit ────────────────────────────────────────────────────
+    # ── 1. Redis unit cache hit ───────────────────────────────────────────────
     if not generation_request.force_new:
-        cached = cache.get_cached_query(query_hash)
-        if cached:
-            db_query = Query(
-                id=str(uuid.uuid4()),
-                user_id=current_user.id,
-                subject=generation_request.subject,
-                topic=generation_request.topic,
-                grade=generation_request.grade,
-                rounds=generation_request.rounds,
-                query_text=build_query_text(
+        cached_ids = cache.get_unit_ids(
+            generation_request.subject,
+            generation_request.topic,
+            generation_request.grade,
+        )
+        if cached_ids:
+            # Best approved material is first in list
+            material = db.query(Material).filter(Material.id == cached_ids[0]).first()
+            if material:
+                # Log the query as a cache-hit record
+                db_query = Query(
+                    id=str(uuid.uuid4()),
+                    user_id=current_user.id,
+                    subject=generation_request.subject,
+                    topic=generation_request.topic,
+                    grade=generation_request.grade,
+                    rounds=generation_request.rounds,
+                    query_text=build_query_text(
+                        generation_request.subject,
+                        generation_request.topic,
+                        generation_request.grade,
+                        generation_request.rounds,
+                    ),
+                    status="completed",
+                    result=material.content_json
+                    if isinstance(material.content_json, str)
+                    else json.dumps(material.content_json),
+                    completed_at=datetime.utcnow(),
+                )
+                db.add(db_query)
+                # Increment times_served
+                material.times_served = (material.times_served or 0) + 1
+                db.commit()
+                cache.update_hot_units(
                     generation_request.subject,
                     generation_request.topic,
                     generation_request.grade,
-                    generation_request.rounds,
-                ),
-                status="completed",
-                result=json.dumps(cached),
-                completed_at=datetime.utcnow(),
-            )
-            db.add(db_query)
-            db.add(Material(
-                id=str(uuid.uuid4()),
-                query_id=db_query.id,
-                content_json=json.dumps(cached.get("results", {})),
-                file_paths=json.dumps(cached.get("files", {})),
-                version=1,
-            ))
-            db.commit()
+                )
+                return GenerationResponse(
+                    generation_id=db_query.id,
+                    status="completed",
+                    message="Returned from cache (unit cache hit). Files are ready.",
+                    from_cache=True,
+                )
 
-            return GenerationResponse(
-                generation_id=db_query.id,
-                status="completed",
-                message="Returned from cache (exact match). Files are ready.",
-                from_cache=True,
-            )
-
-    # ── 2. BM25 similarity suggestions ───────────────────────────────────────
+    # ── 2. BM25 tsvector search ───────────────────────────────────────────────
     query_text = build_query_text(
         generation_request.subject,
         generation_request.topic,
@@ -162,7 +207,106 @@ async def create_generation(
     )
     similar = []
     if not generation_request.force_new:
-        similar = search_service.find_similar(query_text=query_text, db=db, top_k=3)
+        bm25_hits = search_service.find_exact(
+            generation_request.subject,
+            generation_request.topic,
+            generation_request.grade,
+            db,
+        )
+        if bm25_hits:
+            # Return the top BM25 result immediately as a completed response
+            top = bm25_hits[0]
+            material = db.query(Material).filter(
+                Material.id == top["material_id"]
+            ).first()
+            if material:
+                db_query = Query(
+                    id=str(uuid.uuid4()),
+                    user_id=current_user.id,
+                    subject=generation_request.subject,
+                    topic=generation_request.topic,
+                    grade=generation_request.grade,
+                    rounds=generation_request.rounds,
+                    query_text=query_text,
+                    status="completed",
+                    result=material.content_json
+                    if isinstance(material.content_json, str)
+                    else json.dumps(material.content_json),
+                    completed_at=datetime.utcnow(),
+                )
+                db.add(db_query)
+                material.times_served = (material.times_served or 0) + 1
+                db.commit()
+                # Warm Redis for next request
+                cache.set_unit_ids(
+                    generation_request.subject,
+                    generation_request.topic,
+                    generation_request.grade,
+                    [material.id],
+                )
+                cache.update_hot_units(
+                    generation_request.subject,
+                    generation_request.topic,
+                    generation_request.grade,
+                )
+                return GenerationResponse(
+                    generation_id=db_query.id,
+                    status="completed",
+                    message="Found via full-text search. Files are ready.",
+                    from_cache=True,
+                )
+
+        # ── 3. pgvector similarity ─────────────────────────────────────────────
+        vec_hits = search_service.find_similar_by_text(
+            generation_request.subject,
+            generation_request.topic,
+            generation_request.grade,
+            db,
+        )
+        if vec_hits:
+            top = vec_hits[0]
+            material = db.query(Material).filter(
+                Material.id == top["material_id"]
+            ).first()
+            if material:
+                db_query = Query(
+                    id=str(uuid.uuid4()),
+                    user_id=current_user.id,
+                    subject=generation_request.subject,
+                    topic=generation_request.topic,
+                    grade=generation_request.grade,
+                    rounds=generation_request.rounds,
+                    query_text=query_text,
+                    status="completed",
+                    result=material.content_json
+                    if isinstance(material.content_json, str)
+                    else json.dumps(material.content_json),
+                    completed_at=datetime.utcnow(),
+                )
+                db.add(db_query)
+                material.times_served = (material.times_served or 0) + 1
+                db.commit()
+                return GenerationResponse(
+                    generation_id=db_query.id,
+                    status="completed",
+                    message="Found via semantic similarity. Files are ready.",
+                    from_cache=True,
+                )
+
+        # Surface BM25 suggestions to frontend even when we're about to generate
+        similar = [
+            {
+                "generation_id": h["query_id"],
+                "subject": h["subject"],
+                "topic": h["topic"],
+                "grade": h["grade"],
+                "rounds": generation_request.rounds,
+                "similarity_score": h.get("bm25_rank", 0.0),
+                "created_at": None,
+                "status": "completed",
+            }
+            for h in bm25_hits[:3]
+        ]
 
     # ── 3. Queue background generation ───────────────────────────────────────
     db_query = Query(
@@ -251,6 +395,12 @@ def get_generation(
     if not query:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Generation not found")
 
+    material = (
+        db.query(Material).filter(Material.query_id == query.id).first()
+        if query.status == "completed"
+        else None
+    )
+
     return GenerationStatusResponse(
         generation_id=query.id,
         status=query.status,
@@ -262,6 +412,7 @@ def get_generation(
         rounds=query.rounds,
         result=json.loads(query.result) if query.result else None,
         error=query.error_message,
+        material_id=material.id if material else None,
     )
 
 

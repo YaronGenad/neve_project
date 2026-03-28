@@ -1,16 +1,18 @@
 import React, { useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import Box from '@mui/material/Box';
 import Container from '@mui/material/Container';
 import Typography from '@mui/material/Typography';
 import Button from '@mui/material/Button';
+import ButtonGroup from '@mui/material/ButtonGroup';
 import Card from '@mui/material/Card';
 import CardContent from '@mui/material/CardContent';
 import CardHeader from '@mui/material/CardHeader';
 import Grid from '@mui/material/Grid';
 import Chip from '@mui/material/Chip';
 import Alert from '@mui/material/Alert';
+import Snackbar from '@mui/material/Snackbar';
 import CircularProgress from '@mui/material/CircularProgress';
 import LinearProgress from '@mui/material/LinearProgress';
 import Divider from '@mui/material/Divider';
@@ -18,6 +20,8 @@ import Accordion from '@mui/material/Accordion';
 import AccordionSummary from '@mui/material/AccordionSummary';
 import AccordionDetails from '@mui/material/AccordionDetails';
 import Skeleton from '@mui/material/Skeleton';
+import ToggleButton from '@mui/material/ToggleButton';
+import ToggleButtonGroup from '@mui/material/ToggleButtonGroup';
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
 import DownloadIcon from '@mui/icons-material/Download';
 import ArrowBackIcon from '@mui/icons-material/ArrowBack';
@@ -26,8 +30,12 @@ import SchoolIcon from '@mui/icons-material/School';
 import ClassIcon from '@mui/icons-material/Class';
 import RepeatIcon from '@mui/icons-material/Repeat';
 import ErrorOutlineIcon from '@mui/icons-material/ErrorOutline';
-import { getGeneration, downloadFile } from '../api/generations';
+import CheckCircleOutlineIcon from '@mui/icons-material/CheckCircleOutline';
+import RefreshIcon from '@mui/icons-material/Refresh';
+import { getGeneration, downloadFile, submitGeneration } from '../api/generations';
+import { approveMaterial, rejectMaterial, getMaterialVersions } from '../api/materials';
 import { StatusChip } from '../components/StatusChip';
+import { MaterialVersionItem } from '../types';
 
 // File type definitions per round
 interface FileDefinition {
@@ -111,18 +119,76 @@ const DownloadButton: React.FC<DownloadButtonProps> = ({ generationId, fileType,
 export const GenerationDetailPage: React.FC = () => {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
+
+  const [approvalLoading, setApprovalLoading] = useState(false);
+  const [toast, setToast] = useState<{ open: boolean; message: string; severity: 'success' | 'error' }>({
+    open: false,
+    message: '',
+    severity: 'success',
+  });
+  const [selectedVersionId, setSelectedVersionId] = useState<string | null>(null);
 
   const { data, isLoading, isError } = useQuery({
     queryKey: ['generation', id],
     queryFn: () => getGeneration(id!),
     enabled: !!id,
-    // Poll every 5 seconds while pending or processing
     refetchInterval: (query) => {
       const status = query.state.data?.status;
       return status === 'pending' || status === 'processing' ? 5_000 : false;
     },
     staleTime: 2_000,
   });
+
+  // Fetch versions when material data is available
+  const { data: versionsData } = useQuery({
+    queryKey: ['materialVersions', data?.subject, data?.topic, data?.grade],
+    queryFn: () =>
+      getMaterialVersions(data!.subject, data!.topic, data!.grade),
+    enabled: !!(data?.status === 'completed' && data.subject && data.topic && data.grade),
+    staleTime: 10_000,
+  });
+
+  const versions: MaterialVersionItem[] = versionsData?.versions ?? [];
+  const effectiveMaterialId = selectedVersionId ?? data?.material_id ?? null;
+
+  const showToast = (message: string, severity: 'success' | 'error') => {
+    setToast({ open: true, message, severity });
+  };
+
+  const handleApprove = async () => {
+    if (!effectiveMaterialId) return;
+    setApprovalLoading(true);
+    try {
+      await approveMaterial(effectiveMaterialId);
+      showToast('היחידה נשמרה ותוצג למורים נוספים ✓', 'success');
+      queryClient.invalidateQueries({ queryKey: ['materialVersions'] });
+    } catch {
+      showToast('שגיאה בשמירה', 'error');
+    } finally {
+      setApprovalLoading(false);
+    }
+  };
+
+  const handleReject = async () => {
+    if (!effectiveMaterialId) return;
+    setApprovalLoading(true);
+    try {
+      await rejectMaterial(effectiveMaterialId);
+      // Re-generate with force_new=true
+      const res = await submitGeneration({
+        subject: data!.subject,
+        topic: data!.topic,
+        grade: data!.grade,
+        rounds: data!.rounds,
+        force_new: true,
+      });
+      navigate(`/generations/${res.generation_id}`);
+    } catch {
+      showToast('שגיאה ביצירת גרסה חדשה', 'error');
+      setApprovalLoading(false);
+    }
+  };
 
   if (!id) {
     return (
@@ -297,6 +363,72 @@ export const GenerationDetailPage: React.FC = () => {
       {/* Completed — downloads */}
       {isCompleted && data && (
         <>
+          {/* Approval action bar */}
+          <Card sx={{ mb: 3, border: '2px solid', borderColor: 'primary.light' }}>
+            <CardContent sx={{ p: 3 }}>
+              <Typography variant="h6" fontWeight={600} gutterBottom>
+                מה דעתך על היחידה? / ما رأيك في الوحدة؟
+              </Typography>
+
+              {/* Version selector (shown when multiple versions exist) */}
+              {versions.length > 1 && (
+                <Box sx={{ mb: 2 }}>
+                  <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
+                    גרסאות קיימות / الإصدارات المتاحة:
+                  </Typography>
+                  <ToggleButtonGroup
+                    value={effectiveMaterialId}
+                    exclusive
+                    onChange={(_, val) => val && setSelectedVersionId(val)}
+                    size="small"
+                  >
+                    {versions.map((v) => (
+                      <ToggleButton key={v.material_id} value={v.material_id}>
+                        גרסה {v.version} ({v.approval_count} אישורים)
+                      </ToggleButton>
+                    ))}
+                  </ToggleButtonGroup>
+                </Box>
+              )}
+
+              <Box sx={{ display: 'flex', gap: 2, flexWrap: 'wrap', mt: 1 }}>
+                <Button
+                  variant="contained"
+                  color="success"
+                  startIcon={
+                    approvalLoading ? <CircularProgress size={16} color="inherit" /> : <CheckCircleOutlineIcon />
+                  }
+                  disabled={approvalLoading || !effectiveMaterialId}
+                  onClick={handleApprove}
+                >
+                  ✓ מצוין, שמור / ممتاز، احفظ
+                </Button>
+
+                <Button
+                  variant="outlined"
+                  color="warning"
+                  startIcon={
+                    approvalLoading ? <CircularProgress size={16} color="inherit" /> : <RefreshIcon />
+                  }
+                  disabled={approvalLoading || !effectiveMaterialId}
+                  onClick={handleReject}
+                >
+                  ↺ רוצה גרסה אחרת / أريد إصداراً آخر
+                </Button>
+
+                <Button
+                  variant="text"
+                  color="inherit"
+                  startIcon={<DownloadIcon />}
+                  disabled={approvalLoading}
+                  onClick={() => data && downloadFile(data.generation_id, 'student_pdf')}
+                >
+                  ⬇ הורד בלי לאשר / تنزيل بدون موافقة
+                </Button>
+              </Box>
+            </CardContent>
+          </Card>
+
           {/* Global downloads */}
           <Card sx={{ mb: 3 }}>
             <CardHeader
@@ -413,6 +545,22 @@ export const GenerationDetailPage: React.FC = () => {
           </CardContent>
         </Card>
       )}
+
+      {/* Toast notification */}
+      <Snackbar
+        open={toast.open}
+        autoHideDuration={4000}
+        onClose={() => setToast((t) => ({ ...t, open: false }))}
+        anchorOrigin={{ vertical: 'bottom', horizontal: 'center' }}
+      >
+        <Alert
+          severity={toast.severity}
+          onClose={() => setToast((t) => ({ ...t, open: false }))}
+          sx={{ width: '100%' }}
+        >
+          {toast.message}
+        </Alert>
+      </Snackbar>
     </Container>
   );
 };

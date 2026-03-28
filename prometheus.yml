@@ -1,0 +1,39 @@
+global:
+  scrape_interval:     15s   # scrape every 15 seconds
+  evaluation_interval: 15s   # evaluate rules every 15 seconds
+  scrape_timeout:      10s
+
+# ── Alerting ──────────────────────────────────────────────────────────────────
+# alerting:
+#   alertmanagers:
+#     - static_configs:
+#         - targets: ['alertmanager:9093']
+
+# ── Scrape targets ─────────────────────────────────────────────────────────────
+scrape_configs:
+
+  # Al-Hasade backend — exposes /metrics (Prometheus client)
+  - job_name: 'alhasade-backend'
+    static_configs:
+      - targets: ['backend:8000']
+    metrics_path: /metrics
+    scrape_interval: 15s
+    # Track Aurora wake-up latency via DB health check timing
+    # (visible as http_request_duration_seconds{endpoint="/health"})
+
+  # Redis metrics via redis_exporter
+  - job_name: 'redis'
+    static_configs:
+      - targets: ['redis-exporter:9121']
+    scrape_interval: 30s
+
+  # Prometheus itself
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+    scrape_interval: 60s
+
+  # Nginx stub_status (if enabled in nginx.conf)
+  # - job_name: 'nginx'
+  #   static_configs:
+  #     - targets: ['nginx-exporter:9113']

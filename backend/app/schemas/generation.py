@@ -45,6 +45,7 @@ class GenerationStatusResponse(BaseModel):
     rounds: int
     result: Optional[Dict[str, Any]] = None
     error: Optional[str] = None
+    material_id: Optional[str] = None  # set when status == "completed"
 
 
 class GenerationListItem(BaseModel):
@@ -62,3 +63,29 @@ class GenerationListResponse(BaseModel):
     generations: List[GenerationListItem]
     limit: int
     offset: int
+
+
+# ── Approval / versions (Sprint 4.5) ─────────────────────────────────────────
+
+class MaterialApprovalResponse(BaseModel):
+    status: str           # "approved" | "rejected"
+    material_id: str
+    approval_count: Optional[int] = None
+
+
+class MaterialVersionItem(BaseModel):
+    material_id: str
+    version: int
+    approval_count: int
+    times_served: int
+    subject: str
+    topic: str
+    grade: str
+    created_at: Optional[datetime] = None
+
+
+class MaterialVersionsResponse(BaseModel):
+    subject: str
+    topic: str
+    grade: str
+    versions: List[MaterialVersionItem]

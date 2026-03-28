@@ -12,9 +12,11 @@ __pycache__/
 *.py[cod]
 *$py.class
 
-# Environment variables
+# Environment variables — real secrets are never committed
 .env
-.env.example
+.env.prod
+.env.local
+# .env.example and .env.prod.example are committed (they are templates with no real secrets)
 
 # IDE
 .vscode/
@@ -42,3 +44,12 @@ frontend/.env.local
 
 # Generated materials (large runtime output)
 generated_materials/
+
+# Development planning documents (internal, not part of the codebase)
+plans/
+
+# Certbot / SSL (populated on first deploy)
+certbot/
+
+# Local backups
+backups/

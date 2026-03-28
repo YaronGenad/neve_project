@@ -41,6 +41,33 @@ export interface GenerationStatus {
   rounds: number;
   result?: Record<string, unknown>;
   error?: string;
+  material_id?: string;
+}
+
+// ── Materials / Approval (Sprint 4.5) ────────────────────────────────────────
+
+export interface MaterialApprovalResponse {
+  status: 'approved' | 'rejected';
+  material_id: string;
+  approval_count?: number;
+}
+
+export interface MaterialVersionItem {
+  material_id: string;
+  version: number;
+  approval_count: number;
+  times_served: number;
+  subject: string;
+  topic: string;
+  grade: string;
+  created_at?: string;
+}
+
+export interface MaterialVersionsResponse {
+  subject: string;
+  topic: string;
+  grade: string;
+  versions: MaterialVersionItem[];
 }
 
 export interface GenerationListItem {

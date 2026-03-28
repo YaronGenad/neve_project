@@ -1,8 +1,13 @@
 version: "3.9"
 
+# ── Development Docker Compose ─────────────────────────────────────────────────
+# Runs the full stack locally with a bundled Postgres + Redis.
+# For production use docker-compose.prod.yml (Aurora + nginx + SSL).
+
 services:
+
   db:
-    image: postgres:15-alpine
+    image: pgvector/pgvector:pg15
     restart: unless-stopped
     environment:
       POSTGRES_DB: alhasade
@@ -12,12 +17,31 @@ services:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U alhasade -d alhasade"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
 
   redis:
     image: redis:7-alpine
     restart: unless-stopped
     ports:
       - "6379:6379"
+    command: >
+      redis-server
+      --maxmemory 256mb
+      --maxmemory-policy allkeys-lru
+      --save 60 1
+      --loglevel warning
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   backend:
     build:
@@ -35,11 +59,21 @@ services:
       LLM_PROVIDER: ${LLM_PROVIDER:-gemini}
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
       DEBUG: ${DEBUG:-false}
+      OUTPUT_DIR: /app/output
+      MAX_FILE_AGE_HOURS: ${MAX_FILE_AGE_HOURS:-24}
     depends_on:
-      - db
-      - redis
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     volumes:
-      - generated_materials:/app/generated_materials
+      - generated_materials:/app/output
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8000/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
 
   frontend:
     build:
@@ -49,8 +83,15 @@ services:
     ports:
       - "3000:80"
     depends_on:
-      - backend
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:80/ || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
 
 volumes:
   postgres_data:
+  redis_data:
   generated_materials:

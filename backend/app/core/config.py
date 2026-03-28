@@ -25,6 +25,11 @@ class Settings(BaseSettings):
     # File Storage
     UPLOAD_DIR: str = Field(default="./uploads", env="UPLOAD_DIR")
     MAX_FILE_SIZE: int = Field(default=10485760, env="MAX_FILE_SIZE")  # 10MB
+    OUTPUT_DIR: str = Field(default="./output", env="OUTPUT_DIR")
+    MAX_FILE_AGE_HOURS: int = Field(default=24, env="MAX_FILE_AGE_HOURS")
+
+    # Search
+    VECTOR_SIMILARITY_THRESHOLD: float = Field(default=0.3, env="VECTOR_SIMILARITY_THRESHOLD")
 
     # CORS – comma-separated list of allowed origins
     CORS_ORIGINS: str = Field(

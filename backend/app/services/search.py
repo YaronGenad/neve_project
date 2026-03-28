@@ -1,171 +1,236 @@
 """
-BM25-based similarity search service.
+Search service (Sprint 4.5) — Postgres-native BM25 + pgvector.
 
-Uses the rank-bm25 library to find past queries that are similar to a
-new incoming query.  The BM25 index is serialised with pickle and cached
-in Redis so it survives restarts and avoids rebuilding on every request.
+Replaces the rank-bm25 / pickle / Redis-index approach with:
+  1. BM25 via Postgres tsvector + GIN index  (search_exact)
+  2. Cosine similarity via pgvector hnsw     (search_similar)
 
-Hebrew / Arabic text is handled correctly because BM25 operates on
-whitespace-separated tokens – no language-specific stemming is required.
+Both functions return lightweight dicts so callers never import Material
+directly from this module.
+
+plainto_tsquery is used instead of to_tsquery so that arbitrary multi-word
+Hebrew / Arabic text works without manual operator injection.
 """
-import pickle
 import re
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
-from rank_bm25 import BM25Okapi
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from app.models.query import Query
 from app.services.cache import CacheService
+from app.services.embeddings import embed_text, embedding_to_pg_literal
 
 # ── constants ─────────────────────────────────────────────────────────────────
 
-DEFAULT_SIMILARITY_THRESHOLD = 1.0  # minimum BM25 score to surface as a hit
+DEFAULT_SIMILARITY_THRESHOLD = 0.3   # cosine distance (lower = more similar)
 DEFAULT_TOP_K = 5
 
 
 # ── text helpers ──────────────────────────────────────────────────────────────
 
-def normalize_query(text: str) -> str:
-    """
-    Lowercase, strip leading/trailing whitespace, collapse internal
-    whitespace to a single space.  Hebrew text is unaffected by casing.
-    """
-    text = text.lower().strip()
-    text = re.sub(r"\s+", " ", text)
-    return text
-
-
-def tokenize(text: str) -> List[str]:
-    """Split normalized text into whitespace tokens."""
-    return normalize_query(text).split()
+def normalize_query(text_: str) -> str:
+    text_ = text_.lower().strip()
+    return re.sub(r"\s+", " ", text_)
 
 
 def build_query_text(subject: str, topic: str, grade: str, rounds: int) -> str:
-    """Canonical query string used for BM25 indexing and lookup."""
+    """Canonical query string (kept for search endpoint compatibility)."""
     return normalize_query(f"{subject} {topic} {grade} {rounds}")
 
 
-# ── search service ────────────────────────────────────────────────────────────
+# ── search functions ──────────────────────────────────────────────────────────
+
+def search_exact(
+    subject: str,
+    topic: str,
+    grade: str,
+    db: Session,
+    limit: int = 10,
+) -> List[Dict[str, Any]]:
+    """
+    BM25 full-text search via Postgres tsvector.
+
+    Returns up to *limit* materials whose fts_vector matches the query,
+    sorted by BM25 rank DESC then approval_count DESC.
+    """
+    search_text = normalize_query(f"{subject} {topic} {grade}")
+    if not search_text:
+        return []
+
+    try:
+        rows = db.execute(
+            text(
+                """
+                SELECT
+                    m.id            AS material_id,
+                    m.subject,
+                    m.topic,
+                    m.grade,
+                    m.version,
+                    m.approval_count,
+                    m.times_served,
+                    m.file_paths,
+                    m.query_id,
+                    ts_rank(m.fts_vector, plainto_tsquery('simple', :q)) AS rank
+                FROM materials m
+                WHERE m.fts_vector IS NOT NULL
+                  AND m.fts_vector @@ plainto_tsquery('simple', :q)
+                ORDER BY rank DESC, m.approval_count DESC
+                LIMIT :lim
+                """
+            ),
+            {"q": search_text, "lim": limit},
+        ).fetchall()
+    except Exception:
+        return []
+
+    return [
+        {
+            "material_id": r.material_id,
+            "subject": r.subject,
+            "topic": r.topic,
+            "grade": r.grade,
+            "version": r.version,
+            "approval_count": r.approval_count,
+            "times_served": r.times_served,
+            "query_id": r.query_id,
+            "bm25_rank": float(r.rank),
+        }
+        for r in rows
+    ]
+
+
+def search_similar(
+    embedding_vector: List[float],
+    db: Session,
+    threshold: float = DEFAULT_SIMILARITY_THRESHOLD,
+    limit: int = 5,
+) -> List[Dict[str, Any]]:
+    """
+    Semantic similarity search via pgvector cosine distance.
+
+    Returns materials where cosine distance < *threshold*, sorted
+    by ascending distance (closest first).
+    """
+    vec_literal = embedding_to_pg_literal(embedding_vector)
+
+    try:
+        rows = db.execute(
+            text(
+                """
+                SELECT
+                    m.id            AS material_id,
+                    m.subject,
+                    m.topic,
+                    m.grade,
+                    m.version,
+                    m.approval_count,
+                    m.times_served,
+                    m.query_id,
+                    m.embedding <=> CAST(:vec AS vector) AS distance
+                FROM materials m
+                WHERE m.embedding IS NOT NULL
+                  AND m.embedding <=> CAST(:vec AS vector) < :threshold
+                ORDER BY distance
+                LIMIT :lim
+                """
+            ),
+            {"vec": vec_literal, "threshold": threshold, "lim": limit},
+        ).fetchall()
+    except Exception:
+        return []
+
+    return [
+        {
+            "material_id": r.material_id,
+            "subject": r.subject,
+            "topic": r.topic,
+            "grade": r.grade,
+            "version": r.version,
+            "approval_count": r.approval_count,
+            "times_served": r.times_served,
+            "query_id": r.query_id,
+            "distance": float(r.distance),
+        }
+        for r in rows
+    ]
+
+
+# ── main search service ───────────────────────────────────────────────────────
 
 class SearchService:
-    """Stateless wrapper around BM25 + cache."""
+    """
+    Stateless search service.
+
+    Router order (per sprint 4.5 spec):
+      Redis unit cache → BM25 tsvector → pgvector similarity
+    """
 
     def __init__(self, cache_service: CacheService):
         self.cache = cache_service
 
-    # ── index management ──────────────────────────────────────────────────────
+    def find_exact(
+        self, subject: str, topic: str, grade: str, db: Session
+    ) -> List[Dict[str, Any]]:
+        return search_exact(subject, topic, grade, db)
 
-    def build_index_from_db(
-        self, db: Session
-    ) -> Tuple[Optional[BM25Okapi], List[str]]:
-        """
-        Build a fresh BM25 index from all *completed* queries in the DB.
-        Returns (index, query_id_list) – query_id[i] maps to corpus doc i.
-        """
-        queries = (
-            db.query(Query)
-            .filter(Query.status == "completed")
-            .order_by(Query.created_at.asc())
-            .all()
-        )
+    def find_similar_by_text(
+        self,
+        subject: str,
+        topic: str,
+        grade: str,
+        db: Session,
+        threshold: float = DEFAULT_SIMILARITY_THRESHOLD,
+    ) -> List[Dict[str, Any]]:
+        """Embed the query text then run pgvector similarity search."""
+        text_ = normalize_query(f"{subject} {topic} {grade}")
+        embedding = embed_text(text_)
+        if not embedding:
+            return []
+        return search_similar(embedding, db, threshold=threshold)
 
-        if not queries:
-            return None, []
-
-        corpus = [tokenize(q.query_text) for q in queries]
-        query_ids = [q.id for q in queries]
-        index = BM25Okapi(corpus)
-        return index, query_ids
-
-    def _persist_index(self, index: BM25Okapi, query_ids: List[str]) -> None:
-        """Serialise and store the index in Redis."""
-        try:
-            self.cache.store_bm25_index(pickle.dumps(index), query_ids)
-        except Exception:
-            pass  # non-fatal – just won't be cached
-
-    def get_or_build_index(
-        self, db: Session
-    ) -> Tuple[Optional[BM25Okapi], List[str]]:
-        """
-        Return the cached BM25 index if available, otherwise rebuild from DB
-        and cache the result for future calls.
-        """
-        cached = self.cache.get_bm25_index()
-        if cached:
-            index_bytes, query_ids = cached
-            try:
-                return pickle.loads(index_bytes), query_ids
-            except Exception:
-                pass  # corrupt cache – fall through to rebuild
-
-        index, query_ids = self.build_index_from_db(db)
-        if index is not None:
-            self._persist_index(index, query_ids)
-        return index, query_ids
-
-    def invalidate_index(self) -> None:
-        """Force next call to rebuild the BM25 index."""
-        self.cache.invalidate_bm25_index()
-
-    # ── similarity search ─────────────────────────────────────────────────────
-
-    def find_similar(
+    def find_similar_for_search_endpoint(
         self,
         query_text: str,
         db: Session,
         top_k: int = DEFAULT_TOP_K,
-        threshold: float = DEFAULT_SIMILARITY_THRESHOLD,
+        threshold: float = 0.3,
     ) -> List[Dict[str, Any]]:
         """
-        Return up to *top_k* completed queries whose BM25 score against
-        *query_text* is >= *threshold*, sorted by descending score.
-
-        Each result dict contains: generation_id, subject, topic, grade,
-        rounds, similarity_score, created_at, status.
+        Used by the /search endpoint.
+        Runs BM25 first; if not enough results, also runs pgvector.
+        Returns combined, de-duplicated list limited to top_k.
         """
-        index, query_ids = self.get_or_build_index(db)
+        # Parse query_text back into parts (best-effort; used for BM25 subject/topic/grade)
+        parts = query_text.split()
+        subject = parts[0] if len(parts) > 0 else query_text
+        topic = " ".join(parts[1:-1]) if len(parts) > 2 else query_text
+        grade = parts[-1] if len(parts) > 1 else ""
 
-        if index is None or not query_ids:
-            return []
+        bm25_results = search_exact(subject, topic, grade, db, limit=top_k)
+        seen_ids = {r["material_id"] for r in bm25_results}
 
-        tokens = tokenize(query_text)
-        scores = index.get_scores(tokens)
+        # Fill remaining slots with pgvector results
+        remaining = top_k - len(bm25_results)
+        vec_results: List[Dict[str, Any]] = []
+        if remaining > 0:
+            embedding = embed_text(query_text)
+            if embedding:
+                vec_results = [
+                    r for r in search_similar(
+                        embedding, db, threshold=threshold, limit=remaining
+                    )
+                    if r["material_id"] not in seen_ids
+                ]
 
-        # Pair IDs with scores and apply threshold
-        pairs = [
-            (query_ids[i], float(scores[i]))
-            for i in range(len(query_ids))
-            if scores[i] >= threshold
-        ]
-        pairs.sort(key=lambda x: x[1], reverse=True)
-        pairs = pairs[:top_k]
+        combined = bm25_results + vec_results
+        # Add a unified score for the caller
+        for r in bm25_results:
+            r["similarity_score"] = round(r.get("bm25_rank", 0.0), 4)
+        for r in vec_results:
+            r["similarity_score"] = round(1.0 - r.get("distance", 1.0), 4)
 
-        if not pairs:
-            return []
-
-        # Bulk-fetch query details from DB
-        id_set = {p[0] for p in pairs}
-        score_map = dict(pairs)
-        rows = db.query(Query).filter(Query.id.in_(id_set)).all()
-
-        results = [
-            {
-                "generation_id": row.id,
-                "subject": row.subject,
-                "topic": row.topic,
-                "grade": row.grade,
-                "rounds": row.rounds,
-                "similarity_score": round(score_map[row.id], 4),
-                "created_at": row.created_at,
-                "status": row.status,
-            }
-            for row in rows
-        ]
-        # Re-sort because DB query doesn't preserve score order
-        results.sort(key=lambda x: x["similarity_score"], reverse=True)
-        return results
+        return combined[:top_k]
 
 
 # ── dependency factories ──────────────────────────────────────────────────────

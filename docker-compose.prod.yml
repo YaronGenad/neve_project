@@ -1,0 +1,135 @@
+version: "3.9"
+
+# ── Production Docker Compose — LightSail ──────────────────────────────────────
+#
+# Key differences from docker-compose.yml (dev):
+#   - No local `db` service  → uses Aurora Serverless via VPC peering
+#   - nginx service          → SSL termination (Let's Encrypt) + reverse proxy
+#   - certbot service        → certificate renewal
+#   - Redis with eviction policy tuned for production load
+#   - No exposed ports except 80/443 (nginx)
+#
+# Pre-requisites:
+#   1. Copy .env.prod.example → .env.prod and fill in all values
+#   2. Run scripts/init-ssl.sh once to obtain the first certificate
+#   3. docker compose -f docker-compose.prod.yml --env-file .env.prod up -d
+#
+# Aurora connectivity:
+#   LightSail instance must be peered with the Aurora VPC.
+#   See DEPLOYMENT.md §3 for VPC peering setup steps.
+
+services:
+
+  nginx:
+    image: nginx:1.25-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./certbot/conf:/etc/letsencrypt:ro
+      - ./certbot/www:/var/www/certbot:ro
+      - nginx_logs:/var/log/nginx
+    depends_on:
+      - frontend
+      - backend
+    healthcheck:
+      test: ["CMD-SHELL", "nginx -t && wget -q --spider http://localhost:80/health-nginx || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  certbot:
+    image: certbot/certbot:latest
+    restart: "no"
+    volumes:
+      - ./certbot/conf:/etc/letsencrypt
+      - ./certbot/www:/var/www/certbot
+    # Renew certificates; run once a week via cron (see scripts/renew-ssl.sh)
+    entrypoint: >
+      /bin/sh -c "trap exit TERM;
+      while :; do
+        certbot renew --webroot --webroot-path=/var/www/certbot --quiet;
+        sleep 12h & wait $${!};
+      done"
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        - VITE_API_URL=https://${DOMAIN}/api
+    restart: unless-stopped
+    expose:
+      - "80"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:80/ || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    restart: unless-stopped
+    expose:
+      - "8000"
+    environment:
+      DATABASE_URL: ${AURORA_CONNECTION_STRING}
+      REDIS_URL: redis://redis:6379
+      SECRET_KEY: ${SECRET_KEY}
+      GEMINI_API_KEY: ${GEMINI_API_KEY}
+      NVIDIA_API_KEY: ${NVIDIA_API_KEY:-}
+      LLM_PROVIDER: ${LLM_PROVIDER:-gemini}
+      CORS_ORIGINS: https://${DOMAIN}
+      DEBUG: "false"
+      OUTPUT_DIR: /app/output
+      MAX_FILE_AGE_HOURS: ${MAX_FILE_AGE_HOURS:-24}
+      ACCESS_TOKEN_EXPIRE_MINUTES: ${ACCESS_TOKEN_EXPIRE_MINUTES:-15}
+      REFRESH_TOKEN_EXPIRE_DAYS: ${REFRESH_TOKEN_EXPIRE_DAYS:-7}
+      VECTOR_SIMILARITY_THRESHOLD: ${VECTOR_SIMILARITY_THRESHOLD:-0.3}
+    depends_on:
+      redis:
+        condition: service_healthy
+    volumes:
+      - generated_materials:/app/output
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8000/health | grep -q healthy || exit 1"]
+      interval: 30s
+      timeout: 15s
+      retries: 3
+      start_period: 60s
+    # Aurora cold-start can take 10–30s — backend must tolerate slow DB connections
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+        reservations:
+          memory: 512m
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    expose:
+      - "6379"
+    command: >
+      redis-server
+      --maxmemory 256mb
+      --maxmemory-policy allkeys-lru
+      --save 60 1
+      --loglevel warning
+      --protected-mode yes
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  redis_data:
+  generated_materials:
+  nginx_logs:
