@@ -1,125 +1,116 @@
 # א"ל השד"ה — מחולל יחידות לימוד אוטומטי
 
-
-## מה זה
-
 מחולל מבוסס AI שיוצר **חומרי הוראה מוכנים להדפסה** בשיטת א"ל השד"ה —
 שיטת למידה פעילה בתחנות המיושמת בבתי ספר בישראל.
 
-קלט: נושא + מקצוע + כיתה.
-פלט: קובץ PDF מלא לכל תחנה, לכל סבב, כולל מדריך למורה — מוכן להדפסה.
+קלט: נושא + מקצוע + כיתה → פלט: PDF מלא לכל תחנה, לכל סבב, כולל מדריך למורה.
 
 ---
 
-## שיטת א"ל השד"ה
+## ארכיטקטורה
 
-ארבע תחנות עצמאיות — תלמיד יכול להתחיל בכל אחת:
-
-| תחנה | תוכן | נוכחות מורה |
-|------|------|-------------|
-| **הבנה** | טקסט עשיר לקריאה + שאלות דיון בעל פה | רשות |
-| **שיטות** | כתיבה מובנית ומדורגת לפי סוג הטקסט | חובה |
-| **דיוק** | לשון ודקדוק: שורשים, בניינים, הכתבה, זמנים, גופים | רשות |
-| **אוצר מילים** | חוויה ופעולה — מודפסת או פיזית | רשות |
-
----
-
-## התקנה
-
-```bash
-cd alHasade
-pip install -r requirements.txt
-playwright install chromium
+```
+Browser
+  └─► React Frontend (port 3000)
+        └─► FastAPI Backend (port 8000)
+              ├─► Redis 7      — hot unit cache
+              └─► PostgreSQL 15 (pgvector + tsvector)
+                    └─► Gemini Flash — generation on cache/search miss
 ```
 
-יש להעתיק את `.env.example` לקובץ `.env` ולמלא את מפתח ה-API:
+| שכבה | טכנולוגיה |
+|------|-----------|
+| Frontend | React 18 + TypeScript + Vite + MUI v5 (RTL) |
+| Backend | FastAPI + SQLAlchemy 2.0 + Alembic |
+| DB | PostgreSQL 15 + pgvector (embeddings) + tsvector (BM25) |
+| Cache | Redis 7 — מפתחות `unit:{s}:{t}:{g}`, `hot:units:top50` |
+| LLM | Gemini Flash (generation) + text-embedding-004 (semantic search) |
+| Auth | JWT — access token 30min, refresh token 7d |
+
+---
+
+## הרצה מהירה עם Docker
+
+### דרישות מוקדמות
+- Docker 24+ ו-Docker Compose v2
+- מפתח Gemini API
+
+### 1. הגדרת סביבה
 
 ```bash
 cp .env.example .env
-# ערוך את הקובץ — הוסף את GEMINI_API_KEY
+# ערוך .env — מלא את GEMINI_API_KEY ואת SECRET_KEY
+# לייצר SECRET_KEY: openssl rand -hex 32
 ```
 
----
-
-## הרצה
+### 2. הפעלה
 
 ```bash
-# Windows — חשוב לתמיכה בעברית
-python -X utf8 main.py
+docker compose up -d
 ```
 
-ערוך את `config.json` לבחירת הנושא:
+הסטאק עולה בסדר: db → redis → backend (migrations + warmup) → frontend.
 
-```json
-{
-    "subject": "תנך",
-    "topic": "שיבת ציון - ירמיה",
-    "grade": "ח'",
-    "rounds": 4
-}
-```
+| שירות | כתובת |
+|-------|-------|
+| ממשק ווב | http://localhost:3000 |
+| API | http://localhost:8000 |
+| Swagger | http://localhost:8000/docs |
+| Health | http://localhost:8000/health |
 
-הפלט נשמר ב-`output/<נושא> <כיתה>/` — קובץ PDF אחד לכל סבב.
+### 3. הרשמה ראשונה
 
----
+פתח http://localhost:3000, לחץ "הרשמה", צור משתמש ותתחיל ליצור יחידות לימוד.
 
-## מה מיוצר בכל סבב
+### עצירה
 
-לכל אחד מ-4 הסבבים מיוצרים הקבצים הבאים:
-
-```
-├── roadmap.html              — מפת יחידה למורה (פעם אחת לכל היחידה)
-├── round{N}_comprehension    — תחנת הבנה
-├── round{N}_methods          — תחנת שיטות
-├── round{N}_precision        — תחנת דיוק
-├── round{N}_vocabulary       — תחנת אוצר מילים
-├── round{N}_teacher_prep     — הכנת המורה לסבב
-└── round{N}_answer_key       — מחברת תשובות
+```bash
+docker compose down          # עצור (שמור נתונים)
+docker compose down -v       # עצור + מחק volumes
 ```
 
 ---
 
-## סוגי פעילות — תחנת אוצר מילים
+## הרצה ללא Docker (פיתוח)
 
-**מודפסות:**
-`matching_cards`, `sorting_table`, `dominoes`, `fill_in_poster`, `clothesline`, `idiom_cards`, `definition_table`, `crossword_mini`
+### Backend
 
-**פיזיות/חווייתיות:**
-`physical_plasticine` — פיסול מילים בפלסטלינה
-`physical_model` — בניית מודל/דיאגרמה
-`physical_game` — משחק קלפים/לוח/זיכרון
-`physical_poster` — בניית כרזה ותערוכה
-`physical_simulation` — משחק תפקידים וסימולציה
-`physical_clothesline` — חבל כביסה
+```bash
+cd backend
+python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
 
-כל פעילות פיזית כוללת: רשימת חומרים, שלבי ביצוע ממוספרים, וקלפי מילים להדפסה וגזירה.
-
----
-
-## סוגי כתיבה — תחנת שיטות
-
-טיעון (בעד/נגד), תיאור, תשובה מיטבית, סיכום, מיזוג, חוות דעת, דוח, מכתב, שיר קצר, יומן אישי, ניתוח טקסט מידעי, תרשים זרימה.
-
-מדרג קושי בכל שיעור — ירוק/צהוב/אדום.
-
----
-
-## ספק ה-LLM
-
-המערכת תומכת בשני ספקים — ניתן לשינוי ב-`.env`:
-
-```env
-# Gemini (ברירת מחדל — מומלץ לפרודקשן)
-LLM_PROVIDER=gemini
-GEMINI_API_KEY=...
-
-# NVIDIA (לבדיקות — gpt-oss-20b, מודל reasoning)
-LLM_PROVIDER=nvidia
-NVIDIA_API_KEY=...
-NVIDIA_MODEL=openai/gpt-oss-20b
+# הפעל Postgres ו-Redis מקומית, ואז:
+cp .env.example .env   # ערוך DATABASE_URL, REDIS_URL, GEMINI_API_KEY
+alembic upgrade head
+uvicorn app.main:app --reload --port 8000
 ```
 
-מומלץ: **Gemini Flash** — מהיר, זול, עברית מעולה.
+### Frontend
+
+```bash
+cd frontend
+npm install
+npm run dev   # http://localhost:3000
+```
+
+---
+
+## בדיקות
+
+```bash
+cd backend
+
+# כל הבדיקות (SQLite + fakeredis — לא דורש Postgres/Redis חיצוני)
+pytest -v
+
+# סויטות ספציפיות
+pytest test_auth_complete.py -v         # auth + JWT
+pytest test_generations_complete.py -v  # pipeline ייצור
+pytest test_cache_search.py -v          # cache + search
+pytest test_approval_loop.py -v         # approve/reject/versions
+pytest test_security.py -v              # OWASP A01/A03/A04/A07/A08
+```
 
 ---
 
@@ -127,44 +118,74 @@ NVIDIA_MODEL=openai/gpt-oss-20b
 
 ```
 alHasade/
-├── main.py               — נקודת כניסה
-├── config.json           — הגדרות נושא
-├── .env                  — מפתחות API
-├── requirements.txt
-└── src/
-    ├── pipeline.py       — תזמור הזרימה הראשית
-    ├── prompts.py        — כל ה-prompt engineering
-    ├── gemini.py         — שכבת LLM (Gemini + NVIDIA)
-    ├── renderers.py      — HTML → עיצוב A4 מוכן להדפסה
-    ├── pdf.py            — המרת HTML ל-PDF + איחוד
-    └── config.py         — הגדרות כיתות ותחנות
-```
-
-### תהליך הייצור
-
-```
-config.json
-    │
-    ▼
-build_roadmap_prompt()   ─── LLM ──► מפת יחידה (STEAM + ימה"ע)
-    │
-    ▼ (לכל סבב)
-build_*_prompt()         ─── LLM ──► JSON מובנה
-    │
-    ▼
-render_*()               ──────────► HTML מעוצב (RTL, A4)
-    │
-    ▼
-pdf.py                   ──────────► PDF (Playwright + pypdf)
+├── backend/
+│   ├── app/
+│   │   ├── api/          — endpoints: auth, generations, search, materials
+│   │   ├── core/         — config, logging, security
+│   │   ├── db/           — session, base
+│   │   ├── models/       — SQLAlchemy: User, Generation, Material
+│   │   ├── schemas/      — Pydantic schemas
+│   │   ├── services/     — cache.py, search.py, embeddings.py, cleanup.py
+│   │   └── main.py       — FastAPI app, /health, /metrics
+│   ├── alembic/          — migrations (כולל pgvector extension + tsvector trigger)
+│   ├── test_*.py         — 5 קבצי בדיקות
+│   └── requirements.txt
+├── frontend/
+│   └── src/
+│       ├── pages/        — Login, Register, Dashboard, NewGeneration, GenerationDetail
+│       ├── api/          — API clients (auth, generations, search, materials)
+│       ├── contexts/     — AuthContext
+│       └── types/        — TypeScript types
+├── scripts/              — init-ssl.sh, backup.sh, restore.sh, health-check.sh
+├── .github/workflows/    — deploy.yml (test → build GHCR → SSH deploy LightSail)
+├── docker-compose.yml          — dev stack (Postgres + Redis + backend + frontend)
+├── docker-compose.prod.yml     — production (nginx + certbot + Aurora)
+├── docker-compose.monitoring.yml — Prometheus + Grafana + redis-exporter
+├── nginx.conf            — SSL termination, rate limiting, reverse proxy
+├── prometheus.yml        — scrape config
+├── locustfile.py         — load test: 50 מורים במקביל
+└── DEPLOYMENT.md         — runbook מלא לפרודקשן (AWS LightSail + Aurora)
 ```
 
 ---
 
-## דרישות טכניות
+## זרימת הייצור
 
-- Python 3.10+
-- `google-genai` — `pip install google-genai`
-- `playwright` — `pip install playwright && playwright install chromium`
-- `pypdf` — `pip install pypdf`
+```
+POST /generations/  (subject + topic + grade)
+        │
+        ▼
+  Redis unit cache  ──hit──► return cached PDF
+        │ miss
+        ▼
+  BM25 (tsvector / plainto_tsquery)  ──found──► return existing material
+        │ miss
+        ▼
+  pgvector cosine similarity  ──found──► return similar material
+        │ miss
+        ▼
+  Gemini Flash generate  ──► save Material + embedding ──► return new PDF
+```
 
+לאחר קבלת התוצאה המורה יכול לאשר (`/approve`) או לדחות (`/reject`) — `approval_count` ו-`times_served` מתעדכנים בהתאם ומשפיעים על דירוג תוצאות עתידיות.
 
+---
+
+## פרודקשן
+
+לפריסה על AWS LightSail + Aurora Serverless v2 — ראה [DEPLOYMENT.md](DEPLOYMENT.md).
+
+CI/CD אוטומטי דרך GitHub Actions: push ל-`main` → בדיקות → build GHCR → SSH deploy.
+
+---
+
+## שיטת א"ל השד"ה
+
+ארבע תחנות עצמאיות — תלמיד יכול להתחיל בכל אחת:
+
+| תחנה | תוכן |
+|------|------|
+| **הבנה** | טקסט עשיר לקריאה + שאלות דיון |
+| **שיטות** | כתיבה מובנית ומדורגת לפי סוג הטקסט |
+| **דיוק** | לשון ודקדוק: שורשים, בניינים, הכתבה |
+| **אוצר מילים** | חוויה ופעולה — מודפסת או פיזית |
